@@ -10,9 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jusbrasil/pingdom-exporter/pkg/pingdom"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/jusbrasil/pingdom-exporter/pkg/pingdom"
 )
 
 var (
@@ -29,7 +31,7 @@ var (
 
 	pingdomUpDesc = prometheus.NewDesc(
 		"pingdom_up",
-		"Whether the last pingdom scrape was successfull (1: up, 0: down).",
+		"Whether the last pingdom scrape was successful (1: up, 0: down).",
 		nil, nil,
 	)
 
@@ -116,7 +118,7 @@ func (pc pingdomCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting checks: %v", err)
+		fmt.Fprintf(os.Stdout, "Error getting checks: %v", err)
 		ch <- prometheus.MustNewConstMetric(
 			pingdomUpDesc,
 			prometheus.GaugeValue,
@@ -282,25 +284,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	registry := prometheus.NewPedanticRegistry()
 	client, err := pingdom.NewClientWithConfig(pingdom.ClientConfig{
 		Token: token,
 		Tags:  tags,
-	})
+	}, registry)
 
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Cannot create Pingdom client, exiting")
 		os.Exit(1)
 	}
 
-	registry := prometheus.NewPedanticRegistry()
 	collector := pingdomCollector{
 		client: client,
 	}
 
 	registry.MustRegister(
 		collector,
-		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
-		prometheus.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		collectors.NewGoCollector(),
 	)
 
 	http.Handle(metricsPath, promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))

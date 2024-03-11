@@ -2,7 +2,7 @@ package pingdom
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"io"
 )
 
 // CheckService provides an interface to Pingdom checks.
@@ -33,7 +33,7 @@ func (cs *CheckService) List(params ...map[string]string) ([]CheckResponse, erro
 		return nil, err
 	}
 
-	bodyBytes, _ := ioutil.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	bodyString := string(bodyBytes)
 	m := &listChecksJSONResponse{}
 	err = json.Unmarshal([]byte(bodyString), &m)

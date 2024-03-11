@@ -3,9 +3,11 @@ package pingdom
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -24,6 +26,8 @@ type Client struct {
 
 	Checks        *CheckService
 	OutageSummary *OutageSummaryService
+
+	metrics *clientMetrics
 }
 
 // ClientConfig represents a configuration for a pingdom client.
@@ -35,7 +39,7 @@ type ClientConfig struct {
 }
 
 // NewClientWithConfig returns a Pingdom client.
-func NewClientWithConfig(config ClientConfig) (*Client, error) {
+func NewClientWithConfig(config ClientConfig, reg prometheus.Registerer) (*Client, error) {
 	var baseURL *url.URL
 	var err error
 	if config.BaseURL != "" {
@@ -51,6 +55,8 @@ func NewClientWithConfig(config ClientConfig) (*Client, error) {
 		Token:   config.Token,
 		Tags:    config.Tags,
 		BaseURL: baseURL,
+
+		metrics: newMetrics(reg),
 	}
 
 	if config.HTTPClient != nil {
@@ -95,11 +101,16 @@ func (pc *Client) NewRequest(method string, rsc string, params map[string]string
 // passed in interface.  If the HTTP response is outside of the 2xx range the
 // response will be returned along with the error.
 func (pc *Client) Do(req *http.Request, v interface{}) (*http.Response, error) {
+	requestTimer := prometheus.NewTimer(pc.metrics.requestDuration.WithLabelValues(req.Method, req.URL.Path))
+	defer requestTimer.ObserveDuration()
+
 	resp, err := pc.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	pc.collectRateLimitMetricsFromHeader(resp)
 
 	if err := validateResponse(resp); err != nil {
 		return resp, err
@@ -109,12 +120,34 @@ func (pc *Client) Do(req *http.Request, v interface{}) (*http.Response, error) {
 	return resp, err
 }
 
+// collectRateLimitMetricsFromHeader collects rate limit metrics from the response header
+// Example of header values:
+// * req-limit-short: Remaining: 619992 Time until reset: 2602
+// * req-limit-long: Remaining: 71994 Time until reset: 2591989
+func (pc *Client) collectRateLimitMetricsFromHeader(resp *http.Response) {
+	// short term rate limit
+	remainingShort, resetShort := parseRateLimitHeader(resp.Header.Get("req-limit-short"))
+	pc.metrics.pingdomApiRateLimitRemainingShort.WithLabelValues().Set(float64(remainingShort))
+	pc.metrics.pingdomApiRateLimitResetShortSeconds.WithLabelValues().Set(float64(resetShort))
+
+	// long term rate limit
+	remainingLong, resetLong := parseRateLimitHeader(resp.Header.Get("req-limit-long"))
+	pc.metrics.pingdomApiRateLimitRemainingLong.WithLabelValues().Set(float64(remainingLong))
+	pc.metrics.pingdomApiRateLimitResetLongSeconds.WithLabelValues().Set(float64(resetLong))
+}
+
+func parseRateLimitHeader(headerValue string) (int64, int64) {
+	var remaining, reset int64
+	fmt.Sscanf(headerValue, "Remaining: %d Time until reset: %d", &remaining, &reset)
+	return remaining, reset
+}
+
 func decodeResponse(r *http.Response, v interface{}) error {
 	if v == nil {
 		return fmt.Errorf("nil interface provided to decodeResponse")
 	}
 
-	bodyBytes, _ := ioutil.ReadAll(r.Body)
+	bodyBytes, _ := io.ReadAll(r.Body)
 	bodyString := string(bodyBytes)
 	err := json.Unmarshal([]byte(bodyString), &v)
 	return err
@@ -128,7 +161,7 @@ func validateResponse(r *http.Response) error {
 		return nil
 	}
 
-	bodyBytes, _ := ioutil.ReadAll(r.Body)
+	bodyBytes, _ := io.ReadAll(r.Body)
 	bodyString := string(bodyBytes)
 	m := &errorJSONResponse{}
 	err := json.Unmarshal([]byte(bodyString), &m)
